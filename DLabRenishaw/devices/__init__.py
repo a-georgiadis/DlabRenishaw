@@ -8,8 +8,7 @@ from DLabRenishaw.devices.ecm import ECMConnection, ECMException
 from DLabRenishaw.devices.renishaw_adapter import (
     RenishawAdapter,
     RenishawStage,
-    RenishawCamera,
-    RenishawLaser,
+    RenishawImage,
     RenishawSpectrometer
 )
 
@@ -18,7 +17,6 @@ __all__ = [
     "ECMException",
     "RenishawAdapter",
     "RenishawStage",
-    "RenishawCamera",
-    "RenishawLaser",
+    "RenishawImage",
     "RenishawSpectrometer"
 ]

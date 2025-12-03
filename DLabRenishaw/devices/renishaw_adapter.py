@@ -7,8 +7,9 @@ based on the WiRE External Client Interface specification.
 
 import numpy as np
 from typing import Tuple, Dict, Any, Optional, List
-from dlabenishaw.core.device_base import Device, Stage, Camera, LaserSource, Spectrometer
-from dlabenishaw.devices.ecm import ECMConnection, ECMException
+from DLabRenishaw.core.device_base import Device, Stage, Spectrometer
+from DLabRenishaw.devices.ecm import ECMConnection, ECMException
+from base64 import b64decode
 
 
 class RenishawAdapter(Device):
@@ -21,12 +22,12 @@ class RenishawAdapter(Device):
     Parameters
     ----------
     api_url : str
-        Base URL for ECM API (e.g., "http://localhost:8080")
+        Base URL for ECM API (e.g., "'http://localhost:9880/api'")
     timeout : float
         Default timeout for API calls in seconds
     """
     
-    def __init__(self, api_url: str = "http://localhost:8080", timeout: float = 5.0):
+    def __init__(self, api_url: str = "'http://localhost:9880/api'", timeout: float = 5.0):
         self.api_url = api_url
         self.ecm = ECMConnection(api_url)
         self.ecm.rpctimeout = timeout
@@ -34,8 +35,7 @@ class RenishawAdapter(Device):
         # Sub-devices
         self.stage = RenishawStage(self.ecm)
         self.spectrometer = RenishawSpectrometer(self.ecm)
-        self.laser = RenishawLaser(self.ecm)
-        self.camera = RenishawCamera(self.ecm)
+        self.camera = RenishawImage(self.ecm)
         
         self._initialized = False
         self._wire_version = None
@@ -44,13 +44,12 @@ class RenishawAdapter(Device):
         """Initialize connection to Renishaw WiRE system"""
         try:
             # Test connection and get WiRE version
-            self._wire_version = self.ecm.call("System.GetWireVersion")
+            self._wire_version = self.ecm.call("version")
             print(f"Connected to WiRE version: {self._wire_version}")
             
             # Initialize sub-devices
             self.stage.initialize()
             self.spectrometer.initialize()
-            self.laser.initialize()
             self.camera.initialize()
             
             self._initialized = True
@@ -64,8 +63,38 @@ class RenishawAdapter(Device):
             'wire_version': self._wire_version,
             'stage': self.stage.get_state(),
             'spectrometer': self.spectrometer.get_state(),
-            'laser': self.laser.get_state(),
         }
+        
+    def debug_mode(self, debug:bool) -> None:
+        self.ecm.debug = debug
+        pass
+    
+    def get_debug_mode(self)-> bool:
+        return self.ecm.debug
+    
+    def set_optical_path(self, path: int):
+        """
+        Can use to return or set the optical path
+        0 =	Internal Silicon 		        ( Laser and silicon )
+        1 =	Sample with video and laser	    ( Laser and sample+video )
+        2 =	Standard data collection 	    ( Laser and sample )
+        3 =	External 			            ( External )
+        4 =	Internal calibration source     ( Internal calibration source )
+        5 =	Sample with eyepieces only	    ( Eye piece and sample )
+        6 =	Sample with eyepieces and video ( Eye piece and sample+video )
+        7 =	Null podule path		        ( Null )	
+        8 =	Livetrack plus raman		    ( Livetrack + raman )
+        
+        """
+        if path > 8 or path < 0:
+            print("Please enter a valid optical path")
+            return 
+        try:
+            # Attempt to move to the correct path
+            self.ecm.call("MoveMotorsToOpticalPath", opticalPath=path)
+            
+        except ECMException as e:
+            raise RuntimeError(f"Failed to Set Optical Path: {e}")
     
     def set_state(self, state: Dict[str, Any]) -> None:
         """Restore state of all components"""
@@ -73,13 +102,10 @@ class RenishawAdapter(Device):
             self.stage.set_state(state['stage'])
         if 'spectrometer' in state:
             self.spectrometer.set_state(state['spectrometer'])
-        if 'laser' in state:
-            self.laser.set_state(state['laser'])
     
     def shutdown(self) -> None:
         """Disconnect from Renishaw system"""
         if self._initialized:
-            self.laser.shutdown()  # Ensure laser is off
             self.spectrometer.shutdown()
             self.stage.shutdown()
             self._initialized = False
@@ -94,8 +120,15 @@ class RenishawStage(Stage):
     """
     
     def __init__(self, ecm: ECMConnection, log:bool = False):
+        """
+        Initialize stage
+
+        Args:
+            ecm (ECMConnection): Connection to Renishaw WireAPI
+            log (bool, optional): If want to print additional text during movement for debug. Defaults to False.
+        """
         self.ecm = ecm
-        self._current_position = {'x': 0.0, 'y': 0.0, 'z': 0.0}
+        self._current_position = np.array([0.,0.,0.])
         self._limits = None
         self.log = False
     
@@ -122,67 +155,54 @@ class RenishawStage(Stage):
         x, y, z : float, optional
             Target positions in micrometers. If None, axis is not moved.
         """
-        self.get_position()
+        # Get Current Position for if any of the following
+        
         # Use current position for any unspecified axes
-        target_x = x if x is not None else self._current_position['x']
-        target_y = y if y is not None else self._current_position['y']
-        target_z = z if z is not None else self._current_position['z']
+        target_x = x if x is not None else self._current_position[0] # or some default value
+        moveX = True if x is not None else False
+        target_y = y if y is not None else self._current_position[1] # or some default value
+        moveY = True if y is not None else False
+        target_z = z if z is not None else self._current_position[2] # or some default value
+        moveZ = True if z is not None else False
+        
         
         try:
-            # WiRE API: Stages.MoveToPosition
-            self.ecm.call("Stages.MoveToPosition", 
-                         x=target_x, 
-                         y=target_y, 
-                         z=target_z)
+            # Wire.MoveXYZStage
+            self.ecm.call("WiRE.MoveXYZStage", 
+                         xTargetPos=target_x, 
+                         yTargetPos=target_y, 
+                         zTargetPos=target_z,
+                         moveX = moveX,
+                         moveY = moveY,
+                         moveZ = moveZ)
             
             # Update cached position
-            self._current_position = {'x': target_x, 'y': target_y, 'z': target_z}
+            self._update_position()
             
             
         except ECMException as e:
             raise RuntimeError(f"Stage move failed: {e}")
     
-    def get_position(self) -> Dict[str, float]:
+    def get_position(self) -> np.ndarray:
         """Get current stage position"""
         self._update_position()
         return self._current_position.copy()
-    
-    def get_limits(self) -> Dict[str, Tuple[float, float]]:
-        """Get stage travel limits"""
-        if self._limits is None:
-            self._limits = self._get_stage_limits()
-        return self._limits
     
     def _update_position(self) -> None:
         """Read position from hardware"""
         try:
             # WiRE API: Stages.GetPosition
-            pos = self.ecm.call("Stages.GetPosition")
-            self._current_position = {
-                'x': pos.get('x', 0.0),
-                'y': pos.get('y', 0.0),
-                'z': pos.get('z', 0.0),
-            }
+            pos = self.ecm.call("WiRE.GetXYZStagePosition")
+            self._current_position = np.array([pos["xPosition"], pos["yPosition"], pos["zPosition"]])
         except ECMException as e:
             raise RuntimeError(f"Failed to read stage position: {e}")
     
     def _get_stage_limits(self) -> Dict[str, Tuple[float, float]]:
-        """Query stage travel limits from hardware"""
-        try:
-            # WiRE API: Stages.GetLimits
-            limits = self.ecm.call("Stages.GetLimits")
-            return {
-                'x': (limits.get('x_min', 0.0), limits.get('x_max', 100000.0)),
-                'y': (limits.get('y_min', 0.0), limits.get('y_max', 100000.0)),
-                'z': (limits.get('z_min', 0.0), limits.get('z_max', 10000.0)),
-            }
-        except ECMException:
-            # If API doesn't support limits, return defaults
-            return {
-                'x': (0.0, 100000.0),
-                'y': (0.0, 100000.0),
-                'z': (0.0, 10000.0),
-            }
+        """Query stage travel limits from hardware
+        TODO
+        Currently not documented in code - add in in future steps
+        """
+        return {}
     
     def get_state(self) -> Dict[str, Any]:
         """Get stage state"""
@@ -195,7 +215,7 @@ class RenishawStage(Stage):
         """Restore stage state"""
         if 'position' in state:
             pos = state['position']
-            self.move_to(x=pos['x'], y=pos['y'], z=pos['z'])
+            self.move_to(pos)
     
     def shutdown(self) -> None:
         """No cleanup needed for stage"""
@@ -345,49 +365,24 @@ class RenishawSpectrometer(Spectrometer):
         }
     
     def set_state(self, state: Dict[str, Any]) -> None:
-        """Restore spectrometer state"""
-        if 'integration_time' in state:
-            self._integration_time = state['integration_time']
-        if 'accumulations' in state:
-            self._accumulations = state['accumulations']
-        if 'measurement_type' in state:
-            self._measurement_type = state['measurement_type']
+        """Restore spectrometer state
+        
+        Empty Function
+        
+        """
+        pass
+        # if 'integration_time' in state:
+        #     self._integration_time = state['integration_time']
+        # if 'accumulations' in state:
+        #     self._accumulations = state['accumulations']
+        # if 'measurement_type' in state:
+        #     self._measurement_type = state['measurement_type']
     
     def shutdown(self) -> None:
         """No cleanup needed for spectrometer"""
         pass
-
-
-class RenishawLaser(LaserSource):
-    """
-    Laser control for Renishaw system.
-    
-    Controls laser power and enable/disable state.
-    Note: Actual laser control APIs may vary by WiRE version.
-    """
-    
-    def __init__(self, ecm: ECMConnection):
-        self.ecm = ecm
-        self._power_percent = 0.0
-        self._power_mw = 0.0
-        self._enabled = False
-        self._max_power_mw = 100.0  # Will be queried from hardware
-    
-    def initialize(self) -> None:
-        """Initialize laser (ensure it's off)"""
-        try:
-            # Query laser capabilities if API supports it
-            # This is a hypothetical call - adjust based on actual API
-            laser_info = self.ecm.call("Laser.GetInfo")
-            if isinstance(laser_info, dict):
-                self._max_power_mw = laser_info.get('max_power_mw', 100.0)
-            
-        except ECMException:
-            # If not supported, use default
-            pass
         
-        # Ensure laser starts disabled
-        self.set_enabled(False)
+
     
    
 
@@ -574,9 +569,17 @@ class RenishawMeasurementQueue:
             raise RuntimeError(f"Failed to clear queue: {e}")
 
 
-class RenishawCamera(Camera):
-
-    def acquire_image(self) -> np.ndarray:
+class RenishawImage:
+    """_summary_
+    
+    """
+    def __init__(self, ecm: ECMConnection):
+        self.ecm = ecm
+        
+    def initialize(self):
+        pass
+        
+    def acquire_image(self, ) -> np.ndarray:
         """
         Acquire a single image with current settings.
         
@@ -596,7 +599,13 @@ class RenishawCamera(Camera):
         >>> print(image.shape)
         (1024, 1280)
         """
-        pass
+        wireData = self.ecm.call("WiRE.GetImage") # Call Camera to take brightfield image
+        data = wireData.pop('data') # 
+        imgdata = b64decode(data)
+        
+        return imgdata, wireData
+        
+
     
     def set_exposure(self, exposure_ms: float) -> None:
         """
