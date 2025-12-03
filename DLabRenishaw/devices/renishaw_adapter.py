@@ -169,12 +169,12 @@ class RenishawStage(Stage):
         try:
             # Wire.MoveXYZStage
             self.ecm.call("WiRE.MoveXYZStage", 
-                         xTargetPos=target_x, 
-                         yTargetPos=target_y, 
-                         zTargetPos=target_z,
-                         moveX = moveX,
-                         moveY = moveY,
-                         moveZ = moveZ)
+                         xTargetPos=float(target_x), 
+                         yTargetPos=float(target_y), 
+                         zTargetPos=float(target_z),
+                         moveX = float(moveX),
+                         moveY = float(moveY),
+                         moveZ = float(moveZ))
             
             # Update cached position
             self._update_position()
