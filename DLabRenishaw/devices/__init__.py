@@ -10,6 +10,7 @@ from DLabRenishaw.devices.renishaw_adapter import (
     RenishawStage,
     RenishawCamera,
     RenishawLaser,
+    RenishawSpectrometer
 )
 
 __all__ = [
@@ -19,4 +20,5 @@ __all__ = [
     "RenishawStage",
     "RenishawCamera",
     "RenishawLaser",
+    "RenishawSpectrometer"
 ]
