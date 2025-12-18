@@ -10,6 +10,8 @@ from typing import Tuple, Dict, Any, Optional, List
 from DLabRenishaw.core.device_base import Device, Stage, Spectrometer
 from DLabRenishaw.devices.ecm import ECMConnection, ECMException
 from base64 import b64decode
+from PIL import Image
+from io import BytesIO
 
 
 class RenishawAdapter(Device):
@@ -144,6 +146,7 @@ class RenishawStage(Stage):
         except ECMException as e:
             print(f"Warning: Could not read initial stage position: {e}")
     
+    
     def move_to(self, x: Optional[float] = None, 
                 y: Optional[float] = None, 
                 z: Optional[float] = None) -> None:
@@ -172,9 +175,9 @@ class RenishawStage(Stage):
                          xTargetPos=float(target_x), 
                          yTargetPos=float(target_y), 
                          zTargetPos=float(target_z),
-                         moveX = float(moveX),
-                         moveY = float(moveY),
-                         moveZ = float(moveZ))
+                         moveX = moveX,
+                         moveY = moveY,
+                         moveZ = moveZ)
             
             # Update cached position
             self._update_position()
@@ -600,8 +603,8 @@ class RenishawImage:
         (1024, 1280)
         """
         wireData = self.ecm.call("WiRE.GetImage") # Call Camera to take brightfield image
-        data = wireData.pop('data') # 
-        imgdata = b64decode(data)
+        imgData = wireData.pop('data') # 
+        imgdata = Image.open(BytesIO(b64decode(imgData)))
         
         return imgdata, wireData
         
