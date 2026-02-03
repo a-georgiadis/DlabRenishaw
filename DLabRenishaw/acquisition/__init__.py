@@ -5,6 +5,10 @@ Provides high-level protocols for common imaging tasks.
 """
 
 # from DLabRenishaw.acquisition.protocols import AcquisitionProtocol
+from DLabRenishaw.acquisition.renishawacquisition import (
+    renSeriesMeasure,
+    renGridMeasure
+)
 # from DLabRenishaw.acquisition.autofocus import (
 #     autofocus_1d,
 #     AutofocusProtocol,
@@ -13,15 +17,15 @@ Provides high-level protocols for common imaging tasks.
 #     SurfaceMap,
 #     SurfaceMappingProtocol,
 # )
-# from DLabRenishaw.acquisition.multiposition import (
+from DLabRenishaw.acquisition.multiposition import (
 #     OverviewProtocol,
 #     TargetedMeasurementProtocol,
 #     GridAcquisitionProtocol,
 #     TimeLapseProtocol,
-# )
+)
 
-# __all__ = [
-#     "AcquisitionProtocol",
+__all__ = [
+    "AcquisitionProtocol",
 #     "autofocus_1d",
 #     "AutofocusProtocol",
 #     "SurfaceMap",
@@ -30,4 +34,4 @@ Provides high-level protocols for common imaging tasks.
 #     "TargetedMeasurementProtocol",
 #     "GridAcquisitionProtocol",
 #     "TimeLapseProtocol",
-# ]
+]

@@ -7,12 +7,13 @@ based on the WiRE External Client Interface specification.
 
 import numpy as np
 from typing import Tuple, Dict, Any, Optional, List
-from DLabRenishaw.core.device_base import Device, Stage, Spectrometer
+from DLabRenishaw.core.device_base import Device, Stage, Spectrometer, LaserSource
 from DLabRenishaw.devices.ecm import ECMConnection, ECMException
 from base64 import b64decode
 from PIL import Image
 from io import BytesIO
-
+import time
+import sys
 
 class RenishawAdapter(Device):
     """
@@ -67,7 +68,7 @@ class RenishawAdapter(Device):
             'spectrometer': self.spectrometer.get_state(),
         }
         
-    def debug_mode(self, debug:bool) -> None:
+    def set_debug_mode(self, debug:bool) -> None:
         self.ecm.debug = debug
         pass
     
@@ -225,7 +226,7 @@ class RenishawStage(Stage):
         pass
 
 
-class RenishawSpectrometer(Spectrometer):
+class RenishawSpectrometer():
     """
     Spectrometer control for Renishaw Raman system.
     
@@ -236,20 +237,14 @@ class RenishawSpectrometer(Spectrometer):
         self.ecm = ecm
         self._integration_time = 1.0  # seconds
         self._accumulations = 1
-        self._measurement_type = "Single"
         self._last_measurement_handle = None
+        self.defaultTemplate = "" # String to the default template
+        
     
     def initialize(self) -> None:
         """Initialize spectrometer"""
-        try:
-            # Could query available measurement types
-            measurement_types = self.ecm.call("Measurement.GetTypes")
-            if self.ecm.debug:
-                print(f"Available measurement types: {measurement_types}")
-        except ECMException as e:
-            print(f"Warning: Could not query measurement types: {e}")
     
-    def acquire_spectrum(self) -> Tuple[np.ndarray, np.ndarray]:
+    def acquire_single_spectrum(self, template=None, filename=None, timeout=5000):
         """
         Acquire a single Raman spectrum.
         
@@ -260,316 +255,206 @@ class RenishawSpectrometer(Spectrometer):
         intensities : np.ndarray
             Spectral intensities (counts)
         """
+        if template == None:
+            template = self.defaultTemplate
+        
+        # Create a new measurement on the remote system in the paused state
+        handle = self.ecm.call("Queue.Add", paused=True, monitor=False, remoteString=template)
+        print("Measurement queued with handle = " + str(handle))
+        
         try:
-            # Create measurement parameters
-            params = {
-                "MeasurementType": self._measurement_type,
-                "ExposureTime": self._integration_time,
-                "Accumulations": self._accumulations,
-            }
-            
-            # Queue measurement
-            # WiRE API: Queue.AddMeasurement
-            handle = self.ecm.call("Queue.AddMeasurement", **params)
-            self._last_measurement_handle = handle
-            
-            # Start measurement
-            # WiRE API: Queue.Start
-            self.ecm.call("Queue.Start")
-            
-            # Wait for completion
-            status = self.ecm.wait(handle, timeout=int(self._integration_time * 1000 * 2 + 10000))
-            
+
+            # Set the data filename on the remote measurement
+            if filename is not None:
+                filename = self.ecm.call("Measurement.SetFilename", handle=handle, filename=filename, autoincrement=False)
+                print(f"File name set to {filename}")
+
+            # Release the measurement to run on the remote system
+            _ = self.ecm.call("Queue.Continue", handle=handle)
+
+            # Wait for the measurement to complete
+            status = self.ecm.wait(handle=handle, timeout=timeout)
+
+            # If the trigger handling loop has exited and the measurement is not "COMPLETE"
+            # then a measurement has timed out or status is "IDLE" due to aborting"
             if status != "COMPLETE":
-                raise RuntimeError(f"Measurement failed with status: {status}")
-            
-            # Retrieve spectrum data
-            # WiRE API: Queue.GetData
-            data = self.ecm.call("Queue.GetData", handle=handle)
-            
-            # Extract wavenumbers and intensities
-            # Note: Actual structure depends on WiRE API response format
-            # Adjust based on your actual API response
-            if isinstance(data, dict):
-                wavenumbers = np.array(data.get('wavenumbers', []))
-                intensities = np.array(data.get('intensities', []))
+                print(f"Timeout after {timeout}ms with status {status}. Use --timeout to adjust. Aborting.", file=sys.stderr)
+                self.ecm.call("Queue.Abort", handle=handle)
+                time.sleep(0.500)
             else:
-                # If data is returned as list/array, may need different parsing
-                wavenumbers = np.array(data[0]) if len(data) > 0 else np.array([])
-                intensities = np.array(data[1]) if len(data) > 1 else np.array([])
-            
-            return wavenumbers, intensities
-            
-        except ECMException as e:
-            raise RuntimeError(f"Spectrum acquisition failed: {e}")
-    
-    def set_integration_time(self, time_s: float) -> None:
-        """
-        Set integration time for spectral acquisition.
-        
-        Parameters
-        ----------
-        time_s : float
-            Integration time in seconds
-        """
-        if time_s <= 0:
-            raise ValueError("Integration time must be positive")
-        self._integration_time = time_s
-    
-    def get_integration_time(self) -> float:
-        """
-        Get current integration time.
-        
-        Returns
-        -------
-        float
-            Integration time in seconds
-        """
-        return self._integration_time
-    
-    def set_accumulations(self, num_accumulations: int) -> None:
-        """
-        Set number of accumulations to average.
-        
-        Parameters
-        ----------
-        num_accumulations : int
-            Number of spectra to accumulate
-        """
-        if num_accumulations < 1:
-            raise ValueError("Accumulations must be >= 1")
-        self._accumulations = num_accumulations
-    
-    def get_accumulations(self) -> int:
-        """Get current number of accumulations"""
-        return self._accumulations
-    
-    def set_measurement_type(self, measurement_type: str) -> None:
-        """
-        Set measurement type.
-        
-        Parameters
-        ----------
-        measurement_type : str
-            Measurement type (e.g., "Single", "Extended", "StreamLine")
-        """
-        self._measurement_type = measurement_type
-    
-    def get_last_measurement_handle(self) -> Optional[str]:
-        """Get handle of most recent measurement"""
-        return self._last_measurement_handle
-    
-    def get_state(self) -> Dict[str, Any]:
-        """Get spectrometer state"""
-        return {
-            'integration_time': self._integration_time,
-            'accumulations': self._accumulations,
-            'measurement_type': self._measurement_type,
-        }
-    
-    def set_state(self, state: Dict[str, Any]) -> None:
-        """Restore spectrometer state
-        
-        Empty Function
-        
-        """
-        pass
-        # if 'integration_time' in state:
-        #     self._integration_time = state['integration_time']
-        # if 'accumulations' in state:
-        #     self._accumulations = state['accumulations']
-        # if 'measurement_type' in state:
-        #     self._measurement_type = state['measurement_type']
-    
-    def shutdown(self) -> None:
-        """No cleanup needed for spectrometer"""
-        pass
-        
+                filename = self.ecm.call('Measurement.GetFilename', handle=handle)
+                print(f"Measurement complete using \"{filename}\"")
 
-    
-   
 
-class RenishawMeasurementQueue:
-    """
-    Helper class for managing WiRE measurement queue.
-    
-    This class provides higher-level interface to the Queue.* API methods
-    for creating, executing, and retrieving measurements.
-    """
-    
-    def __init__(self, ecm: ECMConnection):
-        self.ecm = ecm
-    
-    def add_measurement(self, 
-                       measurement_type: str = "Single",
-                       exposure: float = 1.0,
-                       accumulations: int = 1,
-                       paused: bool = False,
-                       monitor: bool = False,
-                       **kwargs) -> str:
-        """
-        Add a measurement to the queue.
-        
-        Parameters
-        ----------
-        measurement_type : str
-            Type of measurement (e.g., "Single", "Extended", "StreamLine")
-        exposure : float
-            Exposure time in seconds
-        accumulations : int
-            Number of accumulations
-        paused : bool
-            If True, measurement starts paused
-        monitor : bool
-            If True, WiRE will display measurement progress
-        **kwargs
-            Additional measurement parameters
-        
-        Returns
-        -------
-        str
-            Measurement handle for subsequent operations
-        """
-        try:
-            # Build measurement parameters
-            params = {
-                "MeasurementType": measurement_type,
-                "ExposureTime": exposure,
-                "Accumulations": accumulations,
-                "Paused": paused,
-                "Monitor": monitor,
-            }
-            params.update(kwargs)
-            
-            # WiRE API: Queue.Add
-            result = self.ecm.call("Queue.Add", 
-                                  paused=paused, 
-                                  monitor=monitor,
-                                  **params)
-            
-            # Extract handle from result
-            if isinstance(result, dict):
-                handle = result.get('handle')
-            else:
-                handle = result
-            
-            return handle
-            
-        except ECMException as e:
-            raise RuntimeError(f"Failed to add measurement to queue: {e}")
-    
-    def continue_measurement(self, handle: str) -> None:
-        """
-        Continue a paused measurement.
-        
-        Parameters
-        ----------
-        handle : str
-            Measurement handle
-        """
-        try:
-            # WiRE API: Queue.Continue
-            self.ecm.call("Queue.Continue", handle=handle)
-        except ECMException as e:
-            raise RuntimeError(f"Failed to continue measurement: {e}")
-    
-    def get_measurement_state(self, handle: str) -> str:
-        """
-        Get current state of a measurement.
-        
-        Parameters
-        ----------
-        handle : str
-            Measurement handle
-        
-        Returns
-        -------
-        str
-            State: "IDLE", "RUNNING", "COMPLETE", "ERROR", etc.
-        """
-        try:
-            # WiRE API: Queue.GetMeasurementState
-            state = self.ecm.call("Queue.GetMeasurementState", handle=handle)
-            return state
-        except ECMException as e:
-            raise RuntimeError(f"Failed to get measurement state: {e}")
-    
-    def wait_for_completion(self, handle: str, timeout: int = 30000) -> str:
-        """
-        Wait for measurement to complete.
-        
-        Parameters
-        ----------
-        handle : str
-            Measurement handle
-        timeout : int
-            Maximum wait time in milliseconds
-        
-        Returns
-        -------
-        str
-            Final state
-        """
-        return self.ecm.wait(handle, timeout=timeout)
-    
-    def get_data(self, handle: str) -> Dict[str, Any]:
-        """
-        Retrieve data from completed measurement.
-        
-        Parameters
-        ----------
-        handle : str
-            Measurement handle
-        
-        Returns
-        -------
-        dict
-            Measurement data including spectra, metadata, etc.
-        """
-        try:
-            # WiRE API: Queue.GetData
-            data = self.ecm.call("Queue.GetData", handle=handle)
-            return data
-        except ECMException as e:
-            raise RuntimeError(f"Failed to retrieve measurement data: {e}")
-    
-    def remove_measurement(self, handle: str) -> None:
-        """
-        Remove measurement from queue.
-        
-        Parameters
-        ----------
-        handle : str
-            Measurement handle
-        """
-        try:
-            # WiRE API: Queue.Remove
+        finally:
+            # Remove the measurement once completed.
             self.ecm.call("Queue.Remove", handle=handle)
-        except ECMException as e:
-            raise RuntimeError(f"Failed to remove measurement: {e}")
+            print("Measurement removed")
     
-    def abort_measurement(self, handle: str) -> None:
-        """
-        Abort a running measurement.
+    def acquire_map_spectrum(self, filename, center, xy_spacing, grid_size, measurement_time, template=None, timeout_multiple=1.4, print_process = False, snake=False):
+        # Helper Function
+        def generate_grid_params(center, xy_spacing, grid_size, row_major=True, snake=False):
+            """ This function is used to generate the inputs for rectangleMap fuction in the Renishaw Wire API
+            it takes in the below arguments and returns the array of params for passing through the API call
+
+            Args:
+                center (list, tuple)(2): List or Tuple of the center of the rectangle array
+                xy_spacing (int/float or list, tuple): Spacing between points either as int/float or pair in list/tuple format if different along x and y
+                grid_size (int/float or list, tuple): Num of pots either as int or pair in list/tuple format if different along x and y
+                row_major (bool, optional): Input for Renishaw Software on whether to scan in rows or columns. Defaults to True.
+                snake (bool, optional): Param for Renishaw software to snake or raster scan. Defaults to False.
+
+            Raises:
+                ValueError: Errors to center, xy_spacing or grid_size params
+
+            Returns:
+                list: Input list for rectangleMap API call in Renishaw Wire Software
+            """
+            # Ensure center is a list or tuple
+            if not isinstance(center, (list, tuple)) or len(center) != 2:
+                raise ValueError("center must be a list or tuple of length 2")
+
+            # Handle xy_spacing: can be a single number or a list/tuple
+            if isinstance(xy_spacing, (int, float)):
+                x_spacing = y_spacing = xy_spacing
+            elif isinstance(xy_spacing, (list, tuple)) and len(xy_spacing) == 2:
+                x_spacing, y_spacing = xy_spacing
+            else:
+                raise ValueError("xy_spacing must be a number or a list/tuple of length 2")
+
+            # Handle grid_size: can be a single number or a list/tuple
+            if isinstance(grid_size, int):
+                nx = ny = grid_size
+            elif isinstance(grid_size, (list, tuple)) and len(grid_size) == 2:
+                nx, ny = grid_size
+            else:
+                raise ValueError("grid_size must be an integer or a list/tuple of length 2")
+
+            center_x, center_y = center
+
+            # Calculate the start points
+            x_start = center_x - (x_spacing * (nx - 1) / 2)
+            y_start = center_y - (y_spacing * (ny - 1) / 2)
+
+            # Create the input array
+            params = [
+                x_start,    # double xStart
+                y_start,    # double yStart
+                x_spacing,  # double xStep
+                y_spacing,  # double yStep
+                nx,         # number nX
+                ny,         # number nY
+                row_major,  # boolean row_major
+                snake       # boolean snake
+            ]
+
+            return params
+
         
-        Parameters
-        ----------
-        handle : str
-            Measurement handle
-        """
+        if template == None:
+            template = self.defaultTemplate
+        
+        map_settings = generate_grid_params(center, xy_spacing, grid_size)
+
+        # Create a new measurement on the remote system in the paused state
+        handle = self.ecm.call("Queue.Add", paused=True, monitor=False, remoteString=template)
+        if print_process: print("Measurement queued with handle = " + str(handle))
+
         try:
-            # WiRE API: Queue.Abort
-            self.ecm.call("Queue.Abort", handle=handle)
-        except ECMException as e:
-            raise RuntimeError(f"Failed to abort measurement: {e}")
+
+            # Set the data filename on the remote measurement
+            if filename is not None:
+                filename = self.ecm.call("Measurement.SetFilename", handle=handle, filename=filename)
+                if print_process: print(f"File name set to '{filename}'")
+
+            # Configure the measurement into a series measurement
+            _ = self.ecm.call("Measurement.SetMap", handle=handle, rectangleParam=map_settings)
+            if print_process: print("Series measurement options set")
+
+            # Release the measurement to run on the remote system
+            _ = self.ecm.call("Queue.Continue", handle=handle)
+            if print_process: print("Begin data collection")
+
+            # Wait for the measurement to complete
+            timeout_time=measurement_time*map_settings[5]*map_settings[6]*timeout_multiple
+            status = self.ecm.wait(handle=handle, timeout=timeout_time)
+
+            # If the trigger handling loop has exited and the measurement is not "COMPLETE"
+            # then a measurement has timed out or status is "IDLE" due to aborting"
+            if status != "COMPLETE":
+                print(f"Timeout after {timeout_time}ms with status {status}. Use --timeout to adjust. Aborting.", file=sys.stderr)
+                self.ecm.call("Queue.Abort", handle=handle)
+                time.sleep(0.500)
+            else:
+                print("Measurement complete")
+
+        finally:
+            # Retrieve the currently queued measurement handles to
+            # check if the measurement is still in the queue
+            handlesPresent = self.ecm.call("Queue.GetHandles")
+            if handlesPresent is not None:
+                for queuedHandle in handlesPresent:
+                    # if the measurement is present remove it from the queue
+                    if queuedHandle == handle:
+                        # Remove the measurement
+                        self.ecm.call("Queue.Remove", handle=handle)
+                        print("Measurement with handle = " + str(handle) + " removed")
+        
+    def acquire_series_spectrum(self, filename, xyList, measurement_time, template=None, timeout_multiple=1.4, print_process = False):
+
+        if template == None:
+            template = self.defaultTemplate
+            
+
+        # Create a new measurement on the remote system in the paused state
+        handle = self.ecm.call("Queue.Add", paused=True, monitor=False, remoteString=template)
+        if print_process: print("Measurement queued with handle = " + str(handle))
+
+        try:
+            # Set the data filename on the remote measurement
+            if filename is not None:
+                filename = self.ecm.call("Measurement.SetFilename", handle=handle, filename=filename)
+                if print_process: print(f"File name set to '{filename}'")
+
+            # Configure the measurement into a series measurement
+            _ = self.ecm.call("Measurement.SetMap", handle=handle, mapXYPoints={'xy_values':xyList})
+            if print_process: print("Series measurement options set")
+
+            # Release the measurement to run on the remote system
+            _ = self.ecm.call("Queue.Continue", handle=handle)
+            if print_process: print("Begin data collection")
+
+            # Wait for the measurement to complete
+            timeout_time=measurement_time*len(xyList)*timeout_multiple
+            status = self.ecm.wait(handle=handle, timeout=timeout_time)
+
+            # If the trigger handling loop has exited and the measurement is not "COMPLETE"
+            # then a measurement has timed out or status is "IDLE" due to aborting"
+            if status != "COMPLETE":
+                print(f"Timeout after {timeout_time}ms with status {status}. Use --timeout to adjust. Aborting.", file=sys.stderr)
+                self.ecm.call("Queue.Abort", handle=handle)
+                time.sleep(0.500)
+            else:
+                print("Measurement complete")
+
+        finally:
+            # Retrieve the currently queued measurement handles to
+            # check if the measurement is still in the queue
+            handlesPresent = self.ecm.call("Queue.GetHandles")
+            if handlesPresent is not None:
+                for queuedHandle in handlesPresent:
+                    # if the measurement is present remove it from the queue
+                    if queuedHandle == handle:
+                        # Remove the measurement
+                        self.ecm.call("Queue.Remove", handle=handle)
+                        print("Measurement with handle = " + str(handle) + " removed")
+        
+        
+    def get_template(self) -> str:
+        return self.defaultTemplate
     
-    def clear_queue(self) -> None:
-        """Clear all measurements from queue"""
-        try:
-            # WiRE API: Queue.Clear
-            self.ecm.call("Queue.Clear")
-        except ECMException as e:
-            raise RuntimeError(f"Failed to clear queue: {e}")
+    def set_template(self, template:str):
+        self.defaultTemplate = template
 
 
 class RenishawImage:
@@ -610,52 +495,52 @@ class RenishawImage:
         
 
     
-    def set_exposure(self, exposure_ms: float) -> None:
-        """
-        Set camera exposure time.
+    # def set_exposure(self, exposure_ms: float) -> None:
+    #     """
+    #     Set camera exposure time.
         
-        Parameters
-        ----------
-        exposure_ms : float
-            Exposure time in milliseconds
+    #     Parameters
+    #     ----------
+    #     exposure_ms : float
+    #         Exposure time in milliseconds
             
-        Raises
-        ------
-        ValueError
-            If exposure is outside valid range
-        """
-        pass
+    #     Raises
+    #     ------
+    #     ValueError
+    #         If exposure is outside valid range
+    #     """
+    #     pass
     
-    def set_illumination(self, lamppower: float)->None:
-        """_summary_
-            Set lamp power from 0-100%
-        Args:
-            lamppower (float): 
-        """
-        # Set lamp power
-        # WiRE.SetIlluminationLamp
-            # int "illuminationPower (0-255)"
+    # def set_illumination(self, lamppower: float)->None:
+    #     """_summary_
+    #         Set lamp power from 0-100%
+    #     Args:
+    #         lamppower (float): 
+    #     """
+    #     # Set lamp power
+    #     # WiRE.SetIlluminationLamp
+    #         # int "illuminationPower (0-255)"
     
-    def get_exposure(self) -> float:
-        """
-        Get current exposure time.
+    # def get_exposure(self) -> float:
+    #     """
+    #     Get current exposure time.
         
-        Returns
-        -------
-        float
-            Exposure time in milliseconds
-        """
-        pass
-        return np.nan
+    #     Returns
+    #     -------
+    #     float
+    #         Exposure time in milliseconds
+    #     """
+    #     pass
+    #     return np.nan
     
-    def get_image_size(self) -> Tuple[int, int]:
-        """
-        Get image dimensions.
+    # def get_image_size(self) -> Tuple[int, int]:
+    #     """
+    #     Get image dimensions.
         
-        Returns
-        -------
-        tuple
-            (width, height) in pixels
-        """
-        # Default implementation - subclasses should override
-        return (1024, 1024)
+    #     Returns
+    #     -------
+    #     tuple
+    #         (width, height) in pixels
+    #     """
+    #     # Default implementation - subclasses should override
+    #     return (1024, 1024)
