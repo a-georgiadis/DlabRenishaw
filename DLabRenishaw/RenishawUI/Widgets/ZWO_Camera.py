@@ -1,21 +1,52 @@
-import napari
-import zwoasi as asi
+import os
+import sys
+from datetime import datetime
 import numpy as np
 import cv2
-import os
-from datetime import datetime
-from qtpy.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel, 
-                            QSlider, QFileDialog, QSpinBox, QHBoxLayout,
-                            QTabWidget, QListWidget)
-from qtpy.QtCore import Qt
-from napari.qt.threading import thread_worker
+import zwoasi as asi
+
+# Force napari to agree with your direct PyQt6 imports
+os.environ["QT_API"] = "pyqt6"
+
+from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel, 
+                             QSlider, QFileDialog, QSpinBox, QHBoxLayout,
+                             QTabWidget, QListWidget, QApplication)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+
+import napari
 
 # 1. Initialize SDK (Replace with your actual path!)
-SDK_PATH = 'path/to/your/ASICamera2.dll' # or .so / .dylib
+SDK_PATH = '' # or .so / .dylib
 try:
     asi.init(SDK_PATH)
 except asi.ZWO_Error as e:
     print(f"SDK Init Error (Already initialized?): {e}")
+
+class CameraStreamer(QThread):
+    # This signal carries the numpy array from the camera to the GUI
+    new_frame = pyqtSignal(np.ndarray) 
+
+    def __init__(self, camera):
+        super().__init__()
+        self.camera = camera
+        self.is_streaming = False
+
+    def run(self):
+        self.is_streaming = True
+        self.camera.start_video_capture()
+        
+        while self.is_streaming:
+            try:
+                # Grab the frame and emit it to the main UI thread
+                frame = self.camera.capture_video_frame()
+                self.new_frame.emit(frame)
+            except Exception as e:
+                print(f"Frame drop: {e}")
+
+    def stop(self):
+        self.is_streaming = False
+        self.camera.stop_video_capture()
+        self.wait() # Safely wait for the thread to close
 
 class ZWOControlPanel(QWidget):
     def __init__(self, viewer):
@@ -161,23 +192,17 @@ class ZWOControlPanel(QWidget):
             print("File not found on disk.")
 
     def start_stream(self):
-        self.camera.start_video_capture()
-        self.is_streaming = True
+        # 1. Create the worker thread
+        self.stream_thread = CameraStreamer(self.camera)
         
-        # Setup the background worker
-        self.worker = self.frame_grabber()
-        self.worker.yielded.connect(self.update_layer)
-        self.worker.start()
-
-    @thread_worker
-    def frame_grabber(self):
-        # This runs in the background and constantly yields frames
-        while self.is_streaming:
-            frame = self.camera.capture_video_frame()
-            yield frame
+        # 2. Connect the worker's signal to your update function
+        self.stream_thread.new_frame.connect(self.update_layer)
+        
+        # 3. Start the background thread
+        self.stream_thread.start()
 
     def update_layer(self, frame):
-        # This receives the frame from the worker and updates the UI
+        # This receives the frame safely in the main GUI thread
         if 'Live Feed' in self.viewer.layers:
             self.viewer.layers['Live Feed'].data = frame
         else:
