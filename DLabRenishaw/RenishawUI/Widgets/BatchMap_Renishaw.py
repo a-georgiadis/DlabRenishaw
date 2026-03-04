@@ -149,24 +149,29 @@ class BatchMappingWidget(QWidget):
         
         # 1. Measurement Params (Intensity / Time)
         params_layout = QHBoxLayout()
+        lbl_intensity = QLabel("Intensity (%):")
         self.spin_intensity = QDoubleSpinBox()
-        self.spin_intensity.setPrefix("Laser %: ")
+        # self.spin_intensity.setPrefix("Laser %: ")
         self.spin_intensity.setRange(0, 100)
         self.spin_intensity.setValue(10.0)
         
         self.spin_time = QDoubleSpinBox()
-        self.spin_time.setPrefix("Acq Time (s): ")
+        lbl_time = QLabel("Acq Time (s):")
         self.spin_time.setRange(0.1, 600)
         self.spin_time.setValue(1.0)
         self.spin_time.valueChanged.connect(self.update_time_estimate)
         
+
+        params_layout.addWidget(lbl_intensity)
         params_layout.addWidget(self.spin_intensity)
+        params_layout.addSpacing(20)
+        params_layout.addWidget(lbl_time)
         params_layout.addWidget(self.spin_time)
         layout.addLayout(params_layout)
         
         # 2. Load Settings File
         load_layout = QHBoxLayout()
-        self.line_filepath = QLineEdit("C:/Default/Settings/config.json")
+        self.line_filepath = QLineEdit(r"C:\Users\Raman user\Desktop\DlabRenishaw\RenishawTemplates\Standard_1200cm_830lp.wxm")
         self.btn_load = QPushButton("Load Config...")
         self.btn_load.clicked.connect(self.load_settings_file)
         
@@ -322,6 +327,14 @@ class BatchMappingWidget(QWidget):
         
         self.update_time_estimate()
 
+    def _name_exists(self, name_to_check):
+        """Helper to scan table for duplicates"""
+        rows = self.table.rowCount()
+        for i in range(rows):
+            if self.table.item(i, 0).text() == name_to_check:
+                return True
+        return False
+
     def remove_point(self):
         row = self.table.currentRow()
         if row >= 0:
@@ -366,15 +379,19 @@ class BatchMappingWidget(QWidget):
             x = float(self.table.item(i, 1).text())
             y = float(self.table.item(i, 2).text())
             z = float(self.table.item(i, 3).text())
-            point = self.table.item(i,4).text()
+            point = self.table.item(i,0).text()
             self._send_move_command(x, y, z)
             if self.grid_group.isVisible():
-                self.renishaw_adapter.spectrometer.acquire_map_spectrum(self.line_savepath+self.line_sample_prefix+point,
+                # self.renishaw_adapter.spectrometer
+                print(self.line_filepath.text())
+                self.renishaw_adapter.spectrometer.acquire_map_spectrum(self.line_savepath.text()+"\\"+self.line_sample_prefix.text()+point+".wdf",
                                                                         (x,y),
                                                                         self.spin_spacing.value(),
                                                                         (self.spin_grid_x.value(), self.spin_grid_y.value()),
-                                                                        self.spin_time.value(),
-                                                                        self.line_filepath)
+                                                                        float(self.spin_time.value()*1000),
+                                                                        self.line_filepath.text(),
+                                                                        laserPower=float(self.spin_intensity.text()),
+                                                                        timeout_multiple=4)
                 self.log_message(f"Measuring {point}, {i+1} of {point_count}")
             else:
                 self.log_message(f"This is currently designed for batch mapping only, please specify a map")
@@ -400,7 +417,8 @@ class BatchMappingWidget(QWidget):
 if __name__ == "__main__":
     from PyQt6.QtWidgets import QApplication
     app = QApplication(sys.argv)
-    renAdapt = RenishawAdapter()
+    renAdapt = RenishawAdapter(api_url='http://localhost:9880/api')
+    renAdapt.initialize()
     widget = BatchMappingWidget(renAdapt)
     widget.show()
     sys.exit(app.exec())

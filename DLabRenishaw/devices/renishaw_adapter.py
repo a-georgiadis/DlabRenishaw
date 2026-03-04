@@ -30,7 +30,7 @@ class RenishawAdapter(Device):
         Default timeout for API calls in seconds
     """
     
-    def __init__(self, api_url: str = "'http://localhost:9880/api'", timeout: float = 5.0):
+    def __init__(self, api_url: str = "http://localhost:9880/api", timeout: float = 5.0):
         self.api_url = api_url
         self.ecm = ECMConnection(api_url)
         self.ecm.rpctimeout = timeout
@@ -291,7 +291,7 @@ class RenishawSpectrometer():
             self.ecm.call("Queue.Remove", handle=handle)
             print("Measurement removed")
     
-    def acquire_map_spectrum(self, filename, center, xy_spacing, grid_size, measurement_time, template=None, timeout_multiple=1.4, print_process = False, snake=False):
+    def acquire_map_spectrum(self, filename, center, xy_spacing, grid_size, measurement_time, template=None, laserPower = "100", timeout_multiple=1.4, print_process = False, snake=False):
         # Helper Function
         def generate_grid_params(center, xy_spacing, grid_size, row_major=True, snake=False):
             """ This function is used to generate the inputs for rectangleMap fuction in the Renishaw Wire API
@@ -366,6 +366,15 @@ class RenishawSpectrometer():
             if filename is not None:
                 filename = self.ecm.call("Measurement.SetFilename", handle=handle, filename=filename)
                 if print_process: print(f"File name set to '{filename}'")
+
+            # if measurement_time is not None:
+            #     _ = self.ecm.call("Measurement.SetExposure", handle=handle, exposure=measurement_time)
+            #     if print_process: print(f"Exposure set to '{measurement_time}'")
+
+            # if laserPower is not None:
+            #     power = self.ecm.call("Measurement.SetLaserPower", handle=handle, power=laserPower)
+            #     print(f"LaserPower set to '{power}'")
+            #     if print_process: print(f"LaserPower set to '{power}'")
 
             # Configure the measurement into a series measurement
             _ = self.ecm.call("Measurement.SetMap", handle=handle, rectangleParam=map_settings)
