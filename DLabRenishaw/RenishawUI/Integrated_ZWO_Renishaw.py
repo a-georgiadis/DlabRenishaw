@@ -42,9 +42,15 @@ class IntegratedAppWidget(QWidget):
         self.base_calib_mag = 1.0
         
         self.objectives = {"Base": 1.0} # Name -> Magnification
+        self.preload_objectives()
         
         self.init_ui()
         self.setup_mouse_callbacks()
+
+    def preload_objectives(self):
+        csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "objectives.csv")
+        if os.path.exists(csv_path):
+            self.load_csv_from_path(csv_path)
         
     def init_ui(self):
         main_layout = QVBoxLayout()
@@ -90,10 +96,10 @@ class IntegratedAppWidget(QWidget):
         self.btn_start_calib.clicked.connect(self.start_calibration)
         wiz_layout.addWidget(self.btn_start_calib)
         
-        self.btn_calib_action = QPushButton("Action")
-        self.btn_calib_action.clicked.connect(self.calib_action_clicked)
-        self.btn_calib_action.setEnabled(False)
-        wiz_layout.addWidget(self.btn_calib_action)
+        self.btn_recenter = QPushButton("Recenter Camera View")
+        self.btn_recenter.clicked.connect(self.recenter_view)
+        wiz_layout.addWidget(self.btn_recenter)
+        
         wiz_group.setLayout(wiz_layout)
         calib_layout.addWidget(wiz_group)
         
@@ -117,86 +123,48 @@ class IntegratedAppWidget(QWidget):
     def load_objectives_csv(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load Objectives CSV", "", "CSV Files (*.csv)")
         if path:
-            try:
-                with open(path, 'r', encoding='utf-8') as f:
-                    reader = csv.reader(f)
-                    self.objectives.clear()
-                    for row in reader:
-                        if len(row) >= 2:
-                            name = row[0].strip()
-                            try:
-                                mag = float(row[1].strip())
-                                self.objectives[name] = mag
-                            except ValueError:
-                                pass # skip bad rows header
-                
+            self.load_csv_from_path(path)
+
+    def load_csv_from_path(self, path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                self.objectives.clear()
+                for row in reader:
+                    if len(row) >= 2:
+                        name = row[0].strip()
+                        try:
+                            mag = float(row[1].strip())
+                            self.objectives[name] = mag
+                        except ValueError:
+                            pass # skip bad rows header
+            
+            if hasattr(self, 'combo_objective'):
                 self.combo_objective.clear()
                 self.combo_objective.addItems(list(self.objectives.keys()))
-                self.lbl_wizard_status.setText(f"Loaded {len(self.objectives)} objectives.")
-            except Exception as e:
+                self.lbl_wizard_status.setText(f"Loaded {len(self.objectives)} objectives from {os.path.basename(path)}.")
+        except Exception as e:
+            if hasattr(self, 'lbl_wizard_status'):
                 self.lbl_wizard_status.setText(f"Error loading CSV: {e}")
+
+    def recenter_view(self):
+        # Snap the napari camera back to the center of the image
+        if 'Live Feed' in self.viewer.layers:
+            h, w = self.viewer.layers['Live Feed'].data.shape
+            self.viewer.camera.center = (h/2, w/2)
+            self.viewer.camera.zoom = 1.0
 
     def start_calibration(self):
         self.calibration_active = True
         self.calibration_step = 1
         self.calib_pts_pixel = []
         self.btn_start_calib.setEnabled(False)
-        self.btn_calib_action.setEnabled(True)
-        self.btn_calib_action.setText("Set Center")
-        self.lbl_wizard_status.setText("Step 1: Move the Renishaw stage using external controls until your target is perfectly centered on the ZWO crosshair. Then click 'Set Center'.")
-
-    def calib_action_clicked(self):
-        if self.calibration_step == 1:
-            # 1. Record Center
-            try:
-                # get_position() might return a tuple or dict. Ensure it extracts properly.
-                # Assuming it returns a tuple (x, y, z)
-                pos = self.renishaw_adapter.stage.get_position()
-                if isinstance(pos, dict):
-                     self.calib_origin_stage = (pos['x'], pos['y'], pos['z'])
-                else:
-                     self.calib_origin_stage = pos
-            except Exception as e:
-                self.lbl_wizard_status.setText(f"Error reading stage: {e}")
-                self.abort_calibration()
-                return
-            
-            # Move +20 in X
-            try:
-                new_x = self.calib_origin_stage[0] + 20.0
-                self.renishaw_adapter.stage.move_to(new_x, self.calib_origin_stage[1], self.calib_origin_stage[2])
-            except Exception as e:
-                self.lbl_wizard_status.setText(f"Error moving stage: {e}")
-                self.abort_calibration()
-                return
-                
-            self.calibration_step = 2
-            self.btn_calib_action.setEnabled(False)
-            self.btn_calib_action.setText("Waiting for click...")
-            self.lbl_wizard_status.setText("Step 2: Stage moved +20um in X. The target has shifted. Click directly on the target's center in the Napari viewer.")
-            
-        elif self.calibration_step == 3:
-            # User clicked image in step 2 (handled in mouse events), now we move Y
-            try:
-                new_y = self.calib_origin_stage[1] + 20.0
-                # Move to Center X, +20 Y
-                self.renishaw_adapter.stage.move_to(self.calib_origin_stage[0], new_y, self.calib_origin_stage[2])
-            except Exception as e:
-                self.lbl_wizard_status.setText(f"Error moving stage: {e}")
-                self.abort_calibration()
-                return
-
-            self.calibration_step = 4
-            self.btn_calib_action.setEnabled(False)
-            self.btn_calib_action.setText("Waiting for click...")
-            self.lbl_wizard_status.setText("Step 3: Stage moved +20um in Y from center. Click directly on the target's center in the Napari viewer.")
+        self.lbl_wizard_status.setText("Step 1: Move the Renishaw stage using external controls until your target is in view. Then DOUBLE-CLICK the target in the Napari viewer.")
 
     def abort_calibration(self):
         self.calibration_active = False
         self.calibration_step = 0
         self.btn_start_calib.setEnabled(True)
-        self.btn_calib_action.setEnabled(False)
-        self.btn_calib_action.setText("Action")
 
     def complete_calibration(self):
         print("Calib pts:", self.calib_pts_pixel)
@@ -279,6 +247,57 @@ class IntegratedAppWidget(QWidget):
     def setup_mouse_callbacks(self):
         @self.viewer.mouse_double_click_callbacks.append
         def on_double_click(viewer, event):
+            # If we are calibrating, intercept double click for the wizard!
+            if self.calibration_active:
+                data_coords = event.position
+                if len(data_coords) >= 2:
+                    click_y, click_x = data_coords[-2], data_coords[-1]
+                    self.calib_pts_pixel.append((click_y, click_x))
+                    
+                    if self.calibration_step == 1:
+                        # 1. Record Center
+                        try:
+                            pos = self.renishaw_adapter.stage.get_position()
+                            if isinstance(pos, dict):
+                                 self.calib_origin_stage = (pos['x'], pos['y'], pos['z'])
+                            else:
+                                 self.calib_origin_stage = pos
+                        except Exception as e:
+                            self.lbl_wizard_status.setText(f"Error reading stage: {e}")
+                            self.abort_calibration()
+                            return
+                        
+                        # Move +20 in X
+                        try:
+                            new_x = self.calib_origin_stage[0] + 20.0
+                            self.renishaw_adapter.stage.move_to(new_x, self.calib_origin_stage[1], self.calib_origin_stage[2])
+                        except Exception as e:
+                            self.lbl_wizard_status.setText(f"Error moving stage: {e}")
+                            self.abort_calibration()
+                            return
+                            
+                        self.calibration_step = 2
+                        self.lbl_wizard_status.setText("Step 2: Stage moved +20um in X. DOUBLE-CLICK the target in the Napari viewer.")
+                        
+                    elif self.calibration_step == 2:
+                        try:
+                            new_y = self.calib_origin_stage[1] + 20.0
+                            # Move to Center X, +20 Y
+                            self.renishaw_adapter.stage.move_to(self.calib_origin_stage[0], new_y, self.calib_origin_stage[2])
+                        except Exception as e:
+                            self.lbl_wizard_status.setText(f"Error moving stage: {e}")
+                            self.abort_calibration()
+                            return
+
+                        self.calibration_step = 3
+                        self.lbl_wizard_status.setText("Step 3: Stage moved +20um in Y. DOUBLE-CLICK the target in the Napari viewer.")
+                    
+                    elif self.calibration_step == 3:
+                        self.complete_calibration()
+                
+                return # Don't do standard click-to-move during calibration
+                
+            # If not calibrating, normal click-to-move logic
             if self.base_calib_matrix is None:
                 return # Not calibrated
                 
@@ -328,24 +347,7 @@ class IntegratedAppWidget(QWidget):
                 except Exception as e:
                     print(f"Move error: {e}")
 
-        @self.viewer.mouse_drag_callbacks.append
-        def on_click(viewer, event):
-            # Only intercept for calibration wizard
-            if not self.calibration_active:
-                return
-                
-            if self.calibration_step in [2, 4]:
-                 data_coords = event.position
-                 if len(data_coords) >= 2:
-                     click_y, click_x = data_coords[-2], data_coords[-1]
-                     self.calib_pts_pixel.append((click_y, click_x))
-                     
-                     if self.calibration_step == 2:
-                          self.calibration_step = 3
-                          self.btn_calib_action.setEnabled(True)
-                          self.btn_calib_action.setText("Next: Move Y")
-                     elif self.calibration_step == 4:
-                          self.complete_calibration()
+        # Removed the mouse_drag_callbacks entirely since calibration is now double-click
 
 def main():
     viewer = napari.Viewer()
