@@ -168,22 +168,17 @@ class IntegratedAppWidget(QWidget):
 
     def complete_calibration(self):
         print("Calib pts:", self.calib_pts_pixel)
-        if len(self.calib_pts_pixel) < 2:
+        if len(self.calib_pts_pixel) < 3:
              self.lbl_wizard_status.setText("Calibration failed: Missing points.")
              self.abort_calibration()
              return
-             
-        # Center in image is the crosshair origin.
-        if 'Live Feed' in self.viewer.layers:
-            h, w = self.viewer.layers['Live Feed'].data.shape
-            cy, cx = h // 2, w // 2
-        else:
-            cy, cx = 500, 500
 
-        # Point 0: clicked after X moved +20
-        y1, x1 = self.calib_pts_pixel[0]
-        # Point 1: clicked after Y moved +20
-        y2, x2 = self.calib_pts_pixel[1]
+        # Point 0: initial center
+        cy, cx = self.calib_pts_pixel[0]
+        # Point 1: clicked after X moved +20
+        y1, x1 = self.calib_pts_pixel[1]
+        # Point 2: clicked after Y moved +20
+        y2, x2 = self.calib_pts_pixel[2]
         
         # Pixel displacement vectors (dp = p_shifted - p_center)
         dp_x = np.array([x1 - cx, y1 - cy])
@@ -214,7 +209,7 @@ class IntegratedAppWidget(QWidget):
             self.renishaw_adapter.stage.move_to(*self.calib_origin_stage)
             
         except np.linalg.LinAlgError:
-            self.lbl_wizard_status.setText("Error: The clicked points were collinear or invalid. Calibration Failed.")
+            self.lbl_wizard_status.setText("Error: Collinear points. Calibration Failed.")
         
         self.abort_calibration()
 
@@ -226,7 +221,8 @@ class IntegratedAppWidget(QWidget):
         if path:
              data = {
                  "matrix": self.base_calib_matrix.tolist(),
-                 "base_mag": self.base_calib_mag
+                 "base_mag": self.base_calib_mag,
+                 "optical_center": self.zwo_panel.optical_center
              }
              with open(path, 'w') as f:
                  json.dump(data, f)
@@ -240,6 +236,11 @@ class IntegratedAppWidget(QWidget):
                      data = json.load(f)
                  self.base_calib_matrix = np.array(data["matrix"])
                  self.base_calib_mag = data["base_mag"]
+                 center = data.get("optical_center")
+                 if center is not None:
+                     self.zwo_panel.optical_center = tuple(center)
+                     self.zwo_panel.update_crosshair()
+                     
                  self.lbl_wizard_status.setText(f"Loaded calibration. Base mag: {self.base_calib_mag}x")
              except Exception as e:
                  self.lbl_wizard_status.setText(f"Failed to load: {e}")
@@ -256,6 +257,9 @@ class IntegratedAppWidget(QWidget):
                     
                     if self.calibration_step == 1:
                         # 1. Record Center
+                        self.zwo_panel.optical_center = (click_y, click_x)
+                        self.zwo_panel.update_crosshair()
+                        
                         try:
                             pos = self.renishaw_adapter.stage.get_position()
                             if isinstance(pos, dict):
@@ -308,7 +312,9 @@ class IntegratedAppWidget(QWidget):
                 click_y, click_x = data_coords[-2], data_coords[-1]
                 
                 # Center coordinates
-                if 'Live Feed' in self.viewer.layers:
+                if self.zwo_panel.optical_center is not None:
+                    cy, cx = self.zwo_panel.optical_center
+                elif 'Live Feed' in self.viewer.layers:
                     h, w = self.viewer.layers['Live Feed'].data.shape
                     cy, cx = h // 2, w // 2
                 else:

@@ -53,9 +53,13 @@ class ZWOControlPanel(QWidget):
         super().__init__()
         self.viewer = viewer
         self.camera = None
+        self.optical_center = None
         self.save_dir = os.path.expanduser("~")
         self.is_streaming = False
         self.worker = None
+
+        if 'Crosshair' not in self.viewer.layers:
+            self.viewer.add_shapes([], edge_color='red', face_color='transparent', edge_width=3, name='Crosshair')
 
         self.init_ui()
 
@@ -108,6 +112,21 @@ class ZWOControlPanel(QWidget):
         self.crosshair_combo.currentTextChanged.connect(self.update_crosshair)
         crosshair_layout.addWidget(self.crosshair_combo)
         control_layout.addLayout(crosshair_layout)
+
+        # --- Crosshair Customization ---
+        control_layout.addWidget(QLabel("Crosshair Size:"))
+        self.crosshair_size_slider = QSlider(Qt.Horizontal)
+        self.crosshair_size_slider.setRange(5, 1000)
+        self.crosshair_size_slider.setValue(100)
+        self.crosshair_size_slider.valueChanged.connect(lambda: self.update_crosshair())
+        control_layout.addWidget(self.crosshair_size_slider)
+
+        control_layout.addWidget(QLabel("Crosshair Thickness:"))
+        self.crosshair_thickness_slider = QSlider(Qt.Horizontal)
+        self.crosshair_thickness_slider.setRange(1, 20)
+        self.crosshair_thickness_slider.setValue(3)
+        self.crosshair_thickness_slider.valueChanged.connect(lambda: self.update_crosshair())
+        control_layout.addWidget(self.crosshair_thickness_slider)
         
         # --- Crop / Masking ---
         crop_layout = QHBoxLayout()
@@ -230,30 +249,38 @@ class ZWOControlPanel(QWidget):
             self.viewer.add_shapes([rect], shape_type='rectangle', edge_color='blue', face_color='transparent', edge_width=5, name='Crop ROI')
             self.viewer.layers['Crop ROI'].mode = 'select'
 
-    def update_crosshair(self, text):
+    def update_crosshair(self, text=None):
         if 'Crosshair' not in self.viewer.layers:
             return
             
+        if text is None:
+            text = self.crosshair_combo.currentText()
+            
         layer = self.viewer.layers['Crosshair']
+        layer.edge_width = self.crosshair_thickness_slider.value()
+
         if text == "None":
             layer.data = []
             return
             
-        if 'Live Feed' in self.viewer.layers:
+        if self.optical_center is not None:
+            cy, cx = self.optical_center
+        elif 'Live Feed' in self.viewer.layers:
             h, w = self.viewer.layers['Live Feed'].data.shape
             cy, cx = h // 2, w // 2
         else:
             cy, cx = 500, 500  
 
+        size = self.crosshair_size_slider.value()
+
         if text == "Large Cross":
-            size = min(cy, cx) * 0.8
             layer.data = [
                 np.array([[cy - size, cx], [cy + size, cx]]),
                 np.array([[cy, cx - size], [cy, cx + size]]) 
             ]
             layer.shape_type = ['line', 'line']
         elif text == "Circle":
-            radius = min(cy, cx) * 0.05
+            radius = size / 2
             r = radius
             box = np.array([
                 [cy - r, cx - r],
@@ -293,7 +320,7 @@ class ZWOControlPanel(QWidget):
             self.viewer.add_image(frame, name='Live Feed', colormap='gray')
             # Center the crosshair when the first frame arrives
             if self.crosshair_combo.currentText() != "None":
-                self.update_crosshair(self.crosshair_combo.currentText())
+                self.update_crosshair()
             
     def clear_gallery(self):
         # 1. Clear the text list in your PyQt tab
