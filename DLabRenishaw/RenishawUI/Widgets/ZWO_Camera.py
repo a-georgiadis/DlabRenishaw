@@ -78,12 +78,19 @@ class ZWOControlPanel(QWidget):
         self.status_label = QLabel("Status: Disconnected")
         control_layout.addWidget(self.status_label)
 
-        control_layout.addWidget(QLabel("Exposure (µs):"))
-        self.exposure_spin = QSpinBox()
-        self.exposure_spin.setRange(100, 1000000)
-        self.exposure_spin.setValue(10000)
-        self.exposure_spin.valueChanged.connect(self.update_settings)
-        control_layout.addWidget(self.exposure_spin)
+        control_layout.addWidget(QLabel("Exposure (ms):"))
+        exp_layout = QHBoxLayout()
+        self.exposure_slider = QSlider(Qt.Orientation.Horizontal)
+        self.exposure_slider.setRange(1, 10000)
+        self.exposure_slider.setValue(10)
+        self.exposure_slider.valueChanged.connect(self.update_exposure)
+        
+        self.exposure_label = QLabel("10 ms")
+        self.exposure_label.setFixedWidth(50)
+        
+        exp_layout.addWidget(self.exposure_slider)
+        exp_layout.addWidget(self.exposure_label)
+        control_layout.addLayout(exp_layout)
 
         control_layout.addWidget(QLabel("Gain:"))
         self.gain_slider = QSlider(Qt.Horizontal)
@@ -177,9 +184,14 @@ class ZWOControlPanel(QWidget):
         self.update_settings()
         self.start_stream()
 
+    def update_exposure(self):
+        val_ms = self.exposure_slider.value()
+        self.exposure_label.setText(f"{val_ms} ms")
+        self.update_settings()
+
     def update_settings(self):
         if self.camera:
-            self.camera.set_control_value(asi.ASI_EXPOSURE, self.exposure_spin.value())
+            self.camera.set_control_value(asi.ASI_EXPOSURE, self.exposure_slider.value() * 1000)
             self.camera.set_control_value(asi.ASI_GAIN, self.gain_slider.value())
 
     def set_save_dir(self):
@@ -194,18 +206,36 @@ class ZWOControlPanel(QWidget):
 
         print("Pausing stream for 16-bit capture...")
 
-        # 1. Stop the 8-bit video stream and the background worker
-        self.is_streaming = False
-        self.camera.stop_video_capture()
+        # 1. Stop the background worker cleanly
+        if hasattr(self, 'stream_thread') and self.stream_thread.isRunning():
+            self.stream_thread.stop()
 
         # 2. Switch camera to 16-bit mode
         self.camera.set_image_type(asi.ASI_IMG_RAW16)
 
         try:
-            # 3. Capture a single 16-bit frame directly from the camera
-            img_data = self.camera.capture()
+            # 3. Restart video capture to grab a 16-bit frame properly
+            self.camera.start_video_capture()
+            # Toss first two frames which are often left over from 8-bit buffer
+            for _ in range(2):
+                _ = self.camera.capture_video_frame(timeout=5000)
+                
+            img_data = self.camera.capture_video_frame(timeout=5000)
+            self.camera.stop_video_capture()
+            
+            # 4. Verify shape (ZWO bugs sometimes return 1D or wrong sizes)
+            roi = self.camera.get_roi_format()
+            expected_shape = (roi[1], roi[0]) # height, width
+            if img_data.shape != expected_shape:
+                try:
+                    img_data = img_data.reshape(expected_shape)
+                except ValueError:
+                    print(f"Reshape failed: img_data.size={img_data.size}, expected={expected_shape[0]*expected_shape[1]}")
+                    
+            if img_data.dtype != np.uint16:
+                img_data = img_data.astype(np.uint16)
 
-            # 4. Save the image with a timestamp
+            # 5. Save the image with a timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filepath = os.path.join(self.save_dir, f"ZWO_Capture_{timestamp}.tiff")
             cv2.imwrite(filepath, img_data)
@@ -261,35 +291,39 @@ class ZWOControlPanel(QWidget):
 
         if text == "None":
             layer.data = []
-            return
-            
-        if self.optical_center is not None:
-            cy, cx = self.optical_center
-        elif 'Live Feed' in self.viewer.layers:
-            h, w = self.viewer.layers['Live Feed'].data.shape
-            cy, cx = h // 2, w // 2
         else:
-            cy, cx = 500, 500  
-
-        size = self.crosshair_size_slider.value()
-
-        if text == "Large Cross":
-            layer.data = [
-                np.array([[cy - size, cx], [cy + size, cx]]),
-                np.array([[cy, cx - size], [cy, cx + size]]) 
-            ]
-            layer.shape_type = ['line', 'line']
-        elif text == "Circle":
-            radius = size / 2
-            r = radius
-            box = np.array([
-                [cy - r, cx - r],
-                [cy + r, cx - r],
-                [cy + r, cx + r],
-                [cy - r, cx + r]
-            ])
-            layer.data = [box]
-            layer.shape_type = ['ellipse']
+            if self.optical_center is not None:
+                cy, cx = self.optical_center
+            elif 'Live Feed' in self.viewer.layers:
+                h, w = self.viewer.layers['Live Feed'].data.shape
+                cy, cx = h // 2, w // 2
+            else:
+                cy, cx = 500, 500  
+    
+            size = self.crosshair_size_slider.value()
+    
+            if text == "Large Cross":
+                layer.data = [
+                    np.array([[cy - size, cx], [cy + size, cx]]),
+                    np.array([[cy, cx - size], [cy, cx + size]]) 
+                ]
+                layer.shape_type = ['line', 'line']
+            elif text == "Circle":
+                radius = size / 2
+                r = radius
+                box = np.array([
+                    [cy - r, cx - r],
+                    [cy + r, cx - r],
+                    [cy + r, cx + r],
+                    [cy - r, cx + r]
+                ])
+                layer.data = [box]
+                layer.shape_type = ['ellipse']
+                
+        # Move Crosshair to Top
+        idx = self.viewer.layers.index(layer)
+        if idx != len(self.viewer.layers) - 1:
+            self.viewer.layers.move(idx, len(self.viewer.layers) - 1)
 
     def update_layer(self, frame):
         # Apply ROI Masking if enabled
