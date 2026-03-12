@@ -205,7 +205,7 @@ class Camera(Device):
     """
     
     @abstractmethod
-    def snap_image(self) -> np.ndarray:
+    def acquire_image(self) -> np.ndarray:
         """
         Acquire a single image with current settings.
         
@@ -366,86 +366,6 @@ class LaserSource(Device):
             Wavelength in nanometers, or None if not applicable
         """
         return None
-
-
-class FilterWheel(Device):
-    """
-    Abstract base class for filter wheels and filter management.
-    
-    Provides interface for selecting filters by position or name.
-    """
-    
-    @abstractmethod
-    def set_position(self, position: int) -> None:
-        """
-        Set filter wheel to specific position.
-        
-        Parameters
-        ----------
-        position : int
-            Filter position (0-indexed)
-            
-        Raises
-        ------
-        ValueError
-            If position is out of range
-        RuntimeError
-            If filter wheel movement fails
-        """
-        pass
-    
-    @abstractmethod
-    def get_position(self) -> int:
-        """
-        Get current filter position.
-        
-        Returns
-        -------
-        int
-            Current position (0-indexed)
-        """
-        pass
-    
-    @abstractmethod
-    def get_num_positions(self) -> int:
-        """
-        Get total number of filter positions.
-        
-        Returns
-        -------
-        int
-            Number of available positions
-        """
-        pass
-    
-    def set_filter_by_name(self, name: str) -> None:
-        """
-        Set filter by name (if filter labels are defined).
-        
-        Parameters
-        ----------
-        name : str
-            Filter name/label
-            
-        Raises
-        ------
-        ValueError
-            If filter name not found
-        """
-        # Default implementation - subclasses override if they support named filters
-        raise NotImplementedError("Named filter selection not supported")
-    
-    def get_filter_names(self) -> Dict[int, str]:
-        """
-        Get mapping of positions to filter names.
-        
-        Returns
-        -------
-        dict
-            Dictionary mapping position (int) to name (str)
-        """
-        # Default implementation - subclasses override
-        return {}
 
 
 class Shutter(Device):
