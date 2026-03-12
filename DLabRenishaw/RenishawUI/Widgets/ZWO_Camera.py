@@ -106,10 +106,19 @@ class ZWOControlPanel(QWidget):
         self.dir_label.setWordWrap(True)
         control_layout.addWidget(self.dir_label)
 
+        # --- Capture Controls ---
+        capture_layout = QHBoxLayout()
         self.btn_capture = QPushButton("CAPTURE IMAGE")
         self.btn_capture.setStyleSheet("background-color: darkred; color: white; font-weight: bold;")
         self.btn_capture.clicked.connect(self.capture_image)
-        control_layout.addWidget(self.btn_capture)
+        capture_layout.addWidget(self.btn_capture)
+
+        self.bit_depth_combo = QComboBox()
+        self.bit_depth_combo.addItems(["16-bit", "8-bit"])
+        self.bit_depth_combo.setToolTip("Select the bit depth for saved images")
+        capture_layout.addWidget(self.bit_depth_combo)
+        
+        control_layout.addLayout(capture_layout)
 
         # --- Crosshair Settings ---
         crosshair_layout = QHBoxLayout()
@@ -204,19 +213,24 @@ class ZWOControlPanel(QWidget):
         if not self.camera:
             return
 
-        print("Pausing stream for 16-bit capture...")
+        is_16_bit = (self.bit_depth_combo.currentText() == "16-bit")
+        
+        print(f"Pausing stream for {self.bit_depth_combo.currentText()} capture...")
 
         # 1. Stop the background worker cleanly
         if hasattr(self, 'stream_thread') and self.stream_thread.isRunning():
             self.stream_thread.stop()
 
-        # 2. Switch camera to 16-bit mode
-        self.camera.set_image_type(asi.ASI_IMG_RAW16)
+        # 2. Switch camera mode if needed
+        if is_16_bit:
+            self.camera.set_image_type(asi.ASI_IMG_RAW16)
+        else:
+            self.camera.set_image_type(asi.ASI_IMG_RAW8)
 
         try:
-            # 3. Restart video capture to grab a 16-bit frame properly
+            # 3. Restart video capture to grab a frame properly
             self.camera.start_video_capture()
-            # Toss first two frames which are often left over from 8-bit buffer
+            # Toss first two frames which are often left over from previous buffer
             for _ in range(2):
                 _ = self.camera.capture_video_frame(timeout=5000)
                 
@@ -232,21 +246,24 @@ class ZWOControlPanel(QWidget):
                 except ValueError:
                     print(f"Reshape failed: img_data.size={img_data.size}, expected={expected_shape[0]*expected_shape[1]}")
                     
-            if img_data.dtype != np.uint16:
+            if is_16_bit and img_data.dtype != np.uint16:
                 img_data = img_data.astype(np.uint16)
+            elif not is_16_bit and img_data.dtype != np.uint8:
+                img_data = img_data.astype(np.uint8)
 
             # 5. Save the image with a timestamp
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = os.path.join(self.save_dir, f"ZWO_Capture_{timestamp}.tiff")
+            depth_str = "16bit" if is_16_bit else "8bit"
+            filepath = os.path.join(self.save_dir, f"ZWO_Capture_{depth_str}_{timestamp}.tiff")
             cv2.imwrite(filepath, img_data)
-            print(f"Saved 16-bit image: {filepath}")
+            print(f"Saved {depth_str} image: {filepath}")
             self.image_list.addItem(filepath)
 
         except Exception as e:
             print(f"Error during capture: {e}")
 
         finally:
-            # 5. Revert back to 8-bit mode and restart the live stream
+            # 5. Revert back to 8-bit mode (live stream default) and restart the live stream
             self.camera.set_image_type(asi.ASI_IMG_RAW8)
             self.start_stream()
     
