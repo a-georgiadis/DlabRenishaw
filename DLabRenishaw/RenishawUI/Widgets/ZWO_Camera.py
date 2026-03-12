@@ -10,7 +10,7 @@ os.environ["QT_API"] = "pyqt6"
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel, 
                              QSlider, QFileDialog, QSpinBox, QHBoxLayout,
-                             QTabWidget, QListWidget, QApplication)
+                             QTabWidget, QListWidget, QApplication, QComboBox, QCheckBox)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 
 import napari
@@ -99,6 +99,24 @@ class ZWOControlPanel(QWidget):
         self.btn_capture.setStyleSheet("background-color: darkred; color: white; font-weight: bold;")
         self.btn_capture.clicked.connect(self.capture_image)
         control_layout.addWidget(self.btn_capture)
+
+        # --- Crosshair Settings ---
+        crosshair_layout = QHBoxLayout()
+        crosshair_layout.addWidget(QLabel("Crosshair Shape:"))
+        self.crosshair_combo = QComboBox()
+        self.crosshair_combo.addItems(["Large Cross", "Circle", "None"])
+        self.crosshair_combo.currentTextChanged.connect(self.update_crosshair)
+        crosshair_layout.addWidget(self.crosshair_combo)
+        control_layout.addLayout(crosshair_layout)
+        
+        # --- Crop / Masking ---
+        crop_layout = QHBoxLayout()
+        self.crop_checkbox = QCheckBox("Enable ROI Masking")
+        crop_layout.addWidget(self.crop_checkbox)
+        self.btn_add_roi = QPushButton("Add ROI Rectangle")
+        self.btn_add_roi.clicked.connect(self.add_roi_rectangle)
+        crop_layout.addWidget(self.btn_add_roi)
+        control_layout.addLayout(crop_layout)
 
         self.tab_controls.setLayout(control_layout)
 
@@ -201,12 +219,81 @@ class ZWOControlPanel(QWidget):
         # 3. Start the background thread
         self.stream_thread.start()
 
+    def add_roi_rectangle(self):
+        if 'Crop ROI' not in self.viewer.layers:
+            if 'Live Feed' in self.viewer.layers:
+                h, w = self.viewer.layers['Live Feed'].data.shape
+            else:
+                h, w = 1000, 1000
+            
+            rect = np.array([[h//4, w//4], [h//4, w*3//4], [h*3//4, w*3//4], [h*3//4, w//4]])
+            self.viewer.add_shapes([rect], shape_type='rectangle', edge_color='blue', face_color='transparent', edge_width=5, name='Crop ROI')
+            self.viewer.layers['Crop ROI'].mode = 'select'
+
+    def update_crosshair(self, text):
+        if 'Crosshair' not in self.viewer.layers:
+            return
+            
+        layer = self.viewer.layers['Crosshair']
+        if text == "None":
+            layer.data = []
+            return
+            
+        if 'Live Feed' in self.viewer.layers:
+            h, w = self.viewer.layers['Live Feed'].data.shape
+            cy, cx = h // 2, w // 2
+        else:
+            cy, cx = 500, 500  
+
+        if text == "Large Cross":
+            size = min(cy, cx) * 0.8
+            layer.data = [
+                np.array([[cy - size, cx], [cy + size, cx]]),
+                np.array([[cy, cx - size], [cy, cx + size]]) 
+            ]
+            layer.shape_type = ['line', 'line']
+        elif text == "Circle":
+            radius = min(cy, cx) * 0.05
+            r = radius
+            box = np.array([
+                [cy - r, cx - r],
+                [cy + r, cx - r],
+                [cy + r, cx + r],
+                [cy - r, cx + r]
+            ])
+            layer.data = [box]
+            layer.shape_type = ['ellipse']
+
     def update_layer(self, frame):
+        # Apply ROI Masking if enabled
+        if self.crop_checkbox.isChecked() and 'Crop ROI' in self.viewer.layers:
+            roi_layer = self.viewer.layers['Crop ROI']
+            if len(roi_layer.data) > 0:
+                rect = roi_layer.data[0] 
+                y_min = int(np.min(rect[:, 0]))
+                y_max = int(np.max(rect[:, 0]))
+                x_min = int(np.min(rect[:, 1]))
+                x_max = int(np.max(rect[:, 1]))
+                
+                mask = np.zeros_like(frame)
+                h, w = frame.shape
+                y_min = max(0, min(h, y_min))
+                y_max = max(0, min(h, y_max))
+                x_min = max(0, min(w, x_min))
+                x_max = max(0, min(w, x_max))
+                
+                if y_max > y_min and x_max > x_min:
+                    mask[y_min:y_max, x_min:x_max] = 1
+                    frame = frame * mask
+
         # This receives the frame safely in the main GUI thread
         if 'Live Feed' in self.viewer.layers:
             self.viewer.layers['Live Feed'].data = frame
         else:
             self.viewer.add_image(frame, name='Live Feed', colormap='gray')
+            # Center the crosshair when the first frame arrives
+            if self.crosshair_combo.currentText() != "None":
+                self.update_crosshair(self.crosshair_combo.currentText())
             
     def clear_gallery(self):
         # 1. Clear the text list in your PyQt tab
@@ -228,12 +315,7 @@ def main():
     viewer = napari.Viewer()
 
     # 2. Add the Crosshair (Shapes Layer)
-    # This creates a simple cross at the center (adjust coordinates based on your sensor size)
-    crosshair_data = np.array([
-        [[500, 400], [500, 600]], # Vertical line
-        [[400, 500], [600, 500]]  # Horizontal line
-    ])
-    viewer.add_shapes(crosshair_data, shape_type='line', edge_color='red', edge_width=3, name='Crosshair')
+    viewer.add_shapes([], edge_color='red', face_color='transparent', edge_width=3, name='Crosshair')
 
     # 3. Inject our PyQt Widget into the napari dock
     control_panel = ZWOControlPanel(viewer)
