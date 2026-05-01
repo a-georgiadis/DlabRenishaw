@@ -3,6 +3,7 @@ import sys
 import csv
 import json
 import numpy as np
+from datetime import datetime
 
 # Force napari to agree with your direct PyQt6 imports
 os.environ["QT_API"] = "pyqt6"
@@ -209,7 +210,7 @@ class IntegratedAppWidget(QWidget):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         sx, sy, sz = ("", "", "")
-        if stage_pos:
+        if stage_pos is not None:
             sx, sy, sz = stage_pos
             
         m00, m01, m10, m11 = ("", "", "", "")
