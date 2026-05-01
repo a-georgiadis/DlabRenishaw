@@ -9,7 +9,7 @@ os.environ["QT_API"] = "pyqt6"
 
 from PyQt6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel, 
                              QHBoxLayout, QTabWidget, QComboBox, QFileDialog, 
-                             QMessageBox, QApplication, QGroupBox)
+                             QMessageBox, QApplication, QGroupBox, QRadioButton, QButtonGroup)
 from PyQt6.QtCore import Qt
 
 import napari
@@ -40,8 +40,10 @@ class IntegratedAppWidget(QWidget):
         
         self.base_calib_matrix = None # 2x2 matrix relating pixels to um
         self.base_calib_mag = 1.0
+        self.calib_type = None
         
-        self.objectives = {"Base": 1.0} # Name -> Magnification
+        self.objectives = {} # Name -> dict of metadata
+        self.session_calibrated = {} # Name -> bool
         self.preload_objectives()
         
         self.init_ui()
@@ -78,7 +80,12 @@ class IntegratedAppWidget(QWidget):
         row1.addWidget(QLabel("Current Objective:"))
         self.combo_objective = QComboBox()
         self.combo_objective.addItems(list(self.objectives.keys()))
+        self.combo_objective.currentTextChanged.connect(self.update_session_status)
         row1.addWidget(self.combo_objective)
+        
+        self.lbl_calib_status = QLabel("❌")
+        row1.addWidget(self.lbl_calib_status)
+        
         obj_layout.addLayout(row1)
         obj_group.setLayout(obj_layout)
         calib_layout.addWidget(obj_group)
@@ -86,6 +93,22 @@ class IntegratedAppWidget(QWidget):
         # Wizard
         wiz_group = QGroupBox("Calibration Wizard")
         wiz_layout = QVBoxLayout()
+        
+        type_layout = QHBoxLayout()
+        self.radio_laser = QRadioButton("Laser Center")
+        self.radio_laser.setChecked(True)
+        self.radio_umpx = QRadioButton("um/px")
+        self.radio_dist = QRadioButton("Distortion Target")
+        self.calib_group = QButtonGroup()
+        self.calib_group.addButton(self.radio_laser)
+        self.calib_group.addButton(self.radio_umpx)
+        self.calib_group.addButton(self.radio_dist)
+        
+        type_layout.addWidget(self.radio_laser)
+        type_layout.addWidget(self.radio_umpx)
+        type_layout.addWidget(self.radio_dist)
+        wiz_layout.addLayout(type_layout)
+        
         self.lbl_wizard_status = QLabel("Status: Idle")
         self.lbl_wizard_status.setWordWrap(True)
         self.lbl_wizard_status.setMinimumHeight(50)
@@ -130,12 +153,26 @@ class IntegratedAppWidget(QWidget):
             with open(path, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
                 self.objectives.clear()
+                self.session_calibrated.clear()
                 for row in reader:
                     if len(row) >= 2:
                         name = row[0].strip()
+                        if name.lower() == "name": continue # header
                         try:
                             mag = float(row[1].strip())
-                            self.objectives[name] = mag
+                            um_per_px = float(row[2].strip()) if len(row) > 2 and row[2].strip() else None
+                            cx = float(row[3].strip()) if len(row) > 3 and row[3].strip() else None
+                            cy = float(row[4].strip()) if len(row) > 4 and row[4].strip() else None
+                            last_calib = row[5].strip() if len(row) > 5 else None
+                            
+                            self.objectives[name] = {
+                                'mag': mag,
+                                'um_per_px': um_per_px,
+                                'laser_center_x': cx,
+                                'laser_center_y': cy,
+                                'last_calibrated': last_calib
+                            }
+                            self.session_calibrated[name] = False
                         except ValueError:
                             pass # skip bad rows header
             
@@ -143,9 +180,63 @@ class IntegratedAppWidget(QWidget):
                 self.combo_objective.clear()
                 self.combo_objective.addItems(list(self.objectives.keys()))
                 self.lbl_wizard_status.setText(f"Loaded {len(self.objectives)} objectives from {os.path.basename(path)}.")
+                self.update_session_status()
         except Exception as e:
             if hasattr(self, 'lbl_wizard_status'):
                 self.lbl_wizard_status.setText(f"Error loading CSV: {e}")
+
+    def save_objectives_csv(self):
+        csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "objectives.csv")
+        try:
+            with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(["Name", "Magnification", "um_per_px", "laser_center_x", "laser_center_y", "last_calibrated"])
+                for name, data in self.objectives.items():
+                    writer.writerow([
+                        name, 
+                        data.get('mag', 1.0), 
+                        data.get('um_per_px', ''), 
+                        data.get('laser_center_x', ''), 
+                        data.get('laser_center_y', ''), 
+                        data.get('last_calibrated', '')
+                    ])
+        except Exception as e:
+            print(f"Failed to save objectives: {e}")
+
+    def append_calibration_history(self, calib_type, obj_name, cx=None, cy=None, um_per_px=None, stage_pos=None, matrix=None):
+        csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calibrationHistory.csv")
+        file_exists = os.path.exists(csv_path)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        sx, sy, sz = ("", "", "")
+        if stage_pos:
+            sx, sy, sz = stage_pos
+            
+        m00, m01, m10, m11 = ("", "", "", "")
+        if matrix is not None:
+            m00, m01 = matrix[0, 0], matrix[0, 1]
+            m10, m11 = matrix[1, 0], matrix[1, 1]
+            
+        try:
+            with open(csv_path, 'a', encoding='utf-8', newline='') as f:
+                writer = csv.writer(f)
+                if not file_exists:
+                    writer.writerow(["Timestamp", "CalibrationType", "Objective", "Magnification", "CenterX", "CenterY", "um_per_px", "StageX", "StageY", "StageZ", "Matrix_M00", "Matrix_M01", "Matrix_M10", "Matrix_M11"])
+                
+                mag = self.objectives.get(obj_name, {}).get('mag', 1.0)
+                writer.writerow([timestamp, calib_type, obj_name, mag, cx, cy, um_per_px, sx, sy, sz, m00, m01, m10, m11])
+        except Exception as e:
+            print(f"Failed to append history: {e}")
+
+    def update_session_status(self, text=None):
+        if not hasattr(self, 'combo_objective'): return
+        obj = self.combo_objective.currentText()
+        if self.session_calibrated.get(obj, False):
+            self.lbl_calib_status.setText("✅")
+            self.lbl_calib_status.setStyleSheet("color: green; font-weight: bold; font-size: 16px;")
+        else:
+            self.lbl_calib_status.setText("❌")
+            self.lbl_calib_status.setStyleSheet("color: red; font-weight: bold; font-size: 16px;")
 
     def recenter_view(self):
         # Snap the napari camera back to the center of the image
@@ -159,59 +250,22 @@ class IntegratedAppWidget(QWidget):
         self.calibration_step = 1
         self.calib_pts_pixel = []
         self.btn_start_calib.setEnabled(False)
-        self.lbl_wizard_status.setText("Step 1: Move the Renishaw stage using external controls until your target is in view. Then DOUBLE-CLICK the target in the Napari viewer.")
+        
+        if self.radio_laser.isChecked():
+            self.calib_type = "laser"
+            self.lbl_wizard_status.setText("Laser Center Calib: Fire the laser, then DOUBLE-CLICK the location in the Napari viewer.")
+        elif self.radio_umpx.isChecked():
+            self.calib_type = "umpx"
+            self.lbl_wizard_status.setText("um/px Calib Step 1: Move target into view, then DOUBLE-CLICK the target in Napari.")
+        elif self.radio_dist.isChecked():
+            self.calib_type = "dist"
+            self.lbl_wizard_status.setText("Distortion Calib: Feature not yet implemented. Please select another mode.")
+            self.abort_calibration()
 
     def abort_calibration(self):
         self.calibration_active = False
         self.calibration_step = 0
         self.btn_start_calib.setEnabled(True)
-
-    def complete_calibration(self):
-        print("Calib pts:", self.calib_pts_pixel)
-        if len(self.calib_pts_pixel) < 3:
-             self.lbl_wizard_status.setText("Calibration failed: Missing points.")
-             self.abort_calibration()
-             return
-
-        # Point 0: initial center
-        cy, cx = self.calib_pts_pixel[0]
-        # Point 1: clicked after X moved +20
-        y1, x1 = self.calib_pts_pixel[1]
-        # Point 2: clicked after Y moved +20
-        y2, x2 = self.calib_pts_pixel[2]
-        
-        # Pixel displacement vectors (dp = p_shifted - p_center)
-        dp_x = np.array([x1 - cx, y1 - cy])
-        dp_y = np.array([x2 - cx, y2 - cy])
-        
-        # Physical displacement vectors
-        dU_x = np.array([20.0, 0.0])
-        dU_y = np.array([0.0, 20.0])
-        
-        # We want to find Matrix M such that M * dP = dU
-        # dU_x = M * dp_x
-        # dU_y = M * dp_y
-        # [dU_x, dU_y] = M * [dp_x, dp_y]
-        # M = [dU_x, dU_y] * inverse([dp_x, dp_y])
-        
-        dU_mat = np.column_stack((dU_x, dU_y))
-        dP_mat = np.column_stack((dp_x, dp_y))
-        
-        try:
-            self.base_calib_matrix = dU_mat @ np.linalg.inv(dP_mat)
-            
-            obj_name = self.combo_objective.currentText()
-            self.base_calib_mag = self.objectives.get(obj_name, 1.0)
-            
-            self.lbl_wizard_status.setText(f"Calibration Complete! M=\n{self.base_calib_matrix}\nSaved on Objective: {obj_name} ({self.base_calib_mag}x). Double-click image to move!")
-            
-            # Recenter stage
-            self.renishaw_adapter.stage.move_to(*self.calib_origin_stage)
-            
-        except np.linalg.LinAlgError:
-            self.lbl_wizard_status.setText("Error: Collinear points. Calibration Failed.")
-        
-        self.abort_calibration()
 
     def save_calibration(self):
         if self.base_calib_matrix is None:
@@ -248,110 +302,169 @@ class IntegratedAppWidget(QWidget):
     def setup_mouse_callbacks(self):
         @self.viewer.mouse_double_click_callbacks.append
         def on_double_click(viewer, event):
-            # If we are calibrating, intercept double click for the wizard!
             if self.calibration_active:
                 data_coords = event.position
-                if len(data_coords) >= 2:
-                    click_y, click_x = data_coords[-2], data_coords[-1]
+                if len(data_coords) < 2: return
+                click_y, click_x = data_coords[-2], data_coords[-1]
+                
+                try:
+                    pos = self.renishaw_adapter.stage.get_position()
+                    if isinstance(pos, dict):
+                         curr_stage = (pos['x'], pos['y'], pos['z'])
+                    else:
+                         curr_stage = pos
+                except Exception as e:
+                    self.lbl_wizard_status.setText(f"Error reading stage: {e}")
+                    self.abort_calibration()
+                    return
+                
+                obj_name = self.combo_objective.currentText()
+                obj_data = self.objectives.get(obj_name, {})
+                
+                if self.calib_type == "laser":
+                    self.calib_pts_pixel.append((click_y, click_x))
+                    
+                    self.zwo_panel.optical_center = (click_y, click_x)
+                    self.zwo_panel.update_crosshair()
+                    
+                    obj_data['laser_center_x'] = click_x
+                    obj_data['laser_center_y'] = click_y
+                    obj_data['last_calibrated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    self.objectives[obj_name] = obj_data
+                    
+                    self.session_calibrated[obj_name] = True
+                    self.update_session_status()
+                    self.save_objectives_csv()
+                    
+                    self.append_calibration_history("Laser Center", obj_name, cx=click_x, cy=click_y, stage_pos=curr_stage)
+                    
+                    self.lbl_wizard_status.setText(f"Laser Center Calibrated at px({click_x:.1f}, {click_y:.1f})")
+                    self.abort_calibration()
+                    
+                elif self.calib_type == "umpx":
                     self.calib_pts_pixel.append((click_y, click_x))
                     
                     if self.calibration_step == 1:
-                        # 1. Record Center
-                        self.zwo_panel.optical_center = (click_y, click_x)
-                        self.zwo_panel.update_crosshair()
+                        self.calib_origin_stage = curr_stage
+                        
+                        mag = obj_data.get('mag', 1.0)
+                        if mag == 0: mag = 1.0
+                        self.step_size = (20.0 * 5.0) / mag
                         
                         try:
-                            pos = self.renishaw_adapter.stage.get_position()
-                            if isinstance(pos, dict):
-                                 self.calib_origin_stage = (pos['x'], pos['y'], pos['z'])
-                            else:
-                                 self.calib_origin_stage = pos
-                        except Exception as e:
-                            self.lbl_wizard_status.setText(f"Error reading stage: {e}")
-                            self.abort_calibration()
-                            return
-                        
-                        # Move +20 in X
-                        try:
-                            new_x = self.calib_origin_stage[0] + 20.0
-                            self.renishaw_adapter.stage.move_to(new_x, self.calib_origin_stage[1], self.calib_origin_stage[2])
+                            self.renishaw_adapter.stage.move_to(curr_stage[0] + self.step_size, curr_stage[1], curr_stage[2])
                         except Exception as e:
                             self.lbl_wizard_status.setText(f"Error moving stage: {e}")
                             self.abort_calibration()
                             return
                             
                         self.calibration_step = 2
-                        self.lbl_wizard_status.setText("Step 2: Stage moved +20um in X. DOUBLE-CLICK the target in the Napari viewer.")
+                        self.lbl_wizard_status.setText(f"Step 2: Stage moved +{self.step_size:.1f}um in X. DOUBLE-CLICK the target.")
                         
                     elif self.calibration_step == 2:
                         try:
-                            new_y = self.calib_origin_stage[1] + 20.0
-                            # Move to Center X, +20 Y
-                            self.renishaw_adapter.stage.move_to(self.calib_origin_stage[0], new_y, self.calib_origin_stage[2])
+                            self.renishaw_adapter.stage.move_to(self.calib_origin_stage[0], self.calib_origin_stage[1] + self.step_size, self.calib_origin_stage[2])
                         except Exception as e:
                             self.lbl_wizard_status.setText(f"Error moving stage: {e}")
                             self.abort_calibration()
                             return
 
                         self.calibration_step = 3
-                        self.lbl_wizard_status.setText("Step 3: Stage moved +20um in Y. DOUBLE-CLICK the target in the Napari viewer.")
-                    
+                        self.lbl_wizard_status.setText(f"Step 3: Stage moved +{self.step_size:.1f}um in Y. DOUBLE-CLICK the target.")
+                        
                     elif self.calibration_step == 3:
-                        self.complete_calibration()
+                        cy, cx = self.calib_pts_pixel[0]
+                        y1, x1 = self.calib_pts_pixel[1]
+                        y2, x2 = self.calib_pts_pixel[2]
+                        
+                        dp_x = np.array([x1 - cx, y1 - cy])
+                        dp_y = np.array([x2 - cx, y2 - cy])
+                        
+                        dU_x = np.array([self.step_size, 0.0])
+                        dU_y = np.array([0.0, self.step_size])
+                        
+                        dU_mat = np.column_stack((dU_x, dU_y))
+                        dP_mat = np.column_stack((dp_x, dp_y))
+                        
+                        try:
+                            matrix = dU_mat @ np.linalg.inv(dP_mat)
+                            self.base_calib_matrix = matrix
+                            self.base_calib_mag = obj_data.get('mag', 1.0)
+                            
+                            um_px_x = np.linalg.norm(dU_x) / np.linalg.norm(dp_x)
+                            um_px_y = np.linalg.norm(dU_y) / np.linalg.norm(dp_y)
+                            avg_um_px = (um_px_x + um_px_y) / 2.0
+                            
+                            obj_data['um_per_px'] = avg_um_px
+                            obj_data['last_calibrated'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            self.objectives[obj_name] = obj_data
+                            
+                            self.session_calibrated[obj_name] = True
+                            self.update_session_status()
+                            self.save_objectives_csv()
+                            
+                            self.append_calibration_history("um/px", obj_name, cx=cx, cy=cy, um_per_px=avg_um_px, stage_pos=self.calib_origin_stage, matrix=matrix)
+                            
+                            self.lbl_wizard_status.setText(f"um/px Calib Complete! um/px={avg_um_px:.4f}\nM=\n{matrix}")
+                            
+                            self.renishaw_adapter.stage.move_to(*self.calib_origin_stage)
+                            
+                        except np.linalg.LinAlgError:
+                            self.lbl_wizard_status.setText("Error: Collinear points. Calibration Failed.")
+                            
+                        self.abort_calibration()
                 
                 return # Don't do standard click-to-move during calibration
                 
             # If not calibrating, normal click-to-move logic
-            if self.base_calib_matrix is None:
-                return # Not calibrated
-                
-            # Get click position
+            obj_name = self.combo_objective.currentText()
+            obj_data = self.objectives.get(obj_name, {})
+            
             data_coords = event.position
-            # Assuming 2D view, data_coords is (y, x)
-            if len(data_coords) >= 2:
-                click_y, click_x = data_coords[-2], data_coords[-1]
-                
-                # Center coordinates
+            if len(data_coords) < 2: return
+            click_y, click_x = data_coords[-2], data_coords[-1]
+            
+            cx = obj_data.get('laser_center_x')
+            cy = obj_data.get('laser_center_y')
+            if cx is None or cy is None or cx == '' or cy == '':
                 if self.zwo_panel.optical_center is not None:
                     cy, cx = self.zwo_panel.optical_center
                 elif 'Live Feed' in self.viewer.layers:
                     h, w = self.viewer.layers['Live Feed'].data.shape
                     cy, cx = h // 2, w // 2
                 else:
-                    cy, cx = 500, 500
+                    return
+            else:
+                cx, cy = float(cx), float(cy)
+
+            dp = np.array([click_x - cx, click_y - cy])
+            
+            # Use base_calib_matrix if available, otherwise reject
+            if self.base_calib_matrix is None:
+                print("No transfer matrix loaded. Please perform um/px calibration.")
+                return
                 
-                dp = np.array([click_x - cx, click_y - cy])
+            dU_base = self.base_calib_matrix @ dp
+            
+            current_mag = obj_data.get('mag', 1.0)
+            if current_mag != 0:
+                scale_factor = self.base_calib_mag / current_mag
+            else:
+                scale_factor = 1.0
                 
-                # Base real-world offset
-                dU_base = self.base_calib_matrix @ dp
-                
-                # Scale by magnification
-                current_obj = self.combo_objective.currentText()
-                current_mag = self.objectives.get(current_obj, 1.0)
-                
-                if current_mag != 0:
-                    scale_factor = self.base_calib_mag / current_mag
+            dU_scaled = dU_base * scale_factor
+            dx, dy = -dU_scaled[0], -dU_scaled[1]
+            
+            try:
+                pos = self.renishaw_adapter.stage.get_position()
+                if isinstance(pos, dict):
+                     curr_x, curr_y, curr_z = pos['x'], pos['y'], pos['z']
                 else:
-                    scale_factor = 1.0
-                    
-                dU_scaled = dU_base * scale_factor
+                     curr_x, curr_y, curr_z = pos
                 
-                # We need to MOVE the stage to reverse the offset
-                dx, dy = -dU_scaled[0], -dU_scaled[1]
-                
-                print(f"Double click at px ({click_x:.1f}, {click_y:.1f}). Offset um: dx={dx:.2f}, dy={dy:.2f}")
-                
-                # Send move command relative to current pos
-                try:
-                    pos = self.renishaw_adapter.stage.get_position()
-                    if isinstance(pos, dict):
-                         curr_x, curr_y, curr_z = pos['x'], pos['y'], pos['z']
-                    else:
-                         curr_x, curr_y, curr_z = pos
-                    
-                    self.renishaw_adapter.stage.move_to(curr_x + dx, curr_y + dy, curr_z)
-                except Exception as e:
-                    print(f"Move error: {e}")
+                self.renishaw_adapter.stage.move_to(curr_x + dx, curr_y + dy, curr_z)
+            except Exception as e:
+                print(f"Move error: {e}")
 
         # Removed the mouse_drag_callbacks entirely since calibration is now double-click
 
