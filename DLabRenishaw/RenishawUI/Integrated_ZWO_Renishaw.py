@@ -350,7 +350,7 @@ class IntegratedAppWidget(QWidget):
                         
                         mag = obj_data.get('mag', 1.0)
                         if mag == 0: mag = 1.0
-                        self.step_size = (20.0 * 5.0) / mag
+                        self.step_size = (500.0 * 5.0) / mag
                         
                         try:
                             self.renishaw_adapter.stage.move_to(curr_stage[0] + self.step_size, curr_stage[1], curr_stage[2])
